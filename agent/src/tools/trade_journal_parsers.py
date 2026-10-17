@@ -318,7 +318,14 @@ def _to_float(val: Any, default: float = 0.0) -> float:
         return default
     try:
         s = str(val).strip().replace("\u2212", "-")
-        s = _CURRENCY_TOKEN_RE.sub("", s).replace(",", "").strip()
+        s = _CURRENCY_TOKEN_RE.sub("", s)
+        if "," in s and "." in s and s.rfind(",") > s.rfind("."):
+            # "1.234,56": the rightmost separator is the decimal one, so dots
+            # group thousands. Stripping only commas read it as 1.23456.
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+        s = s.strip()
         if not s:
             return default
         # Accounting exports write a negative as "(1,234.50)" (optionally
@@ -579,8 +586,9 @@ def parse_generic(df: pd.DataFrame) -> list[TradeRecord]:
                 return colmap[n]
         return None
 
-    dt_col = pick("datetime", "time")
+    dt_col = pick("datetime")
     date_col = pick("date")
+    time_col = pick("time")
     sym_col = pick("symbol", "ticker", "code")
     name_col = pick("name", "instrument")
     side_col = pick("side", "direction", "action")
@@ -603,9 +611,13 @@ def parse_generic(df: pd.DataFrame) -> list[TradeRecord]:
         if dt_col:
             raw_dt = row.get(dt_col, "")
             dt = _generic_datetime_cell(raw_dt)
+        elif date_col and time_col:
+            dt = _generic_split_datetime(row.get(date_col), row.get(time_col))
         elif date_col:
             raw_dt = row.get(date_col, "")
             dt = _generic_datetime_cell(raw_dt)
+        elif time_col:
+            dt = _generic_datetime_cell(row.get(time_col))
         else:
             dt = ""
         symbol = str(row.get(sym_col, "")).strip() if sym_col else ""
@@ -630,6 +642,26 @@ def parse_generic(df: pd.DataFrame) -> list[TradeRecord]:
             market=market,
         ))
     return records
+
+
+def _generic_split_datetime(date_val: Any, time_val: Any) -> str:
+    """Combine a generic date with a clock string or Excel day fraction."""
+    date = _generic_datetime_cell(date_val)
+    day = pd.to_datetime(date, errors="coerce")
+    # Never let a clock alone replace a missing/invalid date with today.
+    if pd.isna(day) or time_val is None or pd.isna(time_val):
+        return date
+    time = str(time_val).strip()
+    if not time:
+        return date
+    try:
+        fraction = float(time)
+    except ValueError:
+        fraction = None
+    if fraction is not None and 0 <= fraction < 1:
+        combined = day.normalize() + pd.to_timedelta(fraction, unit="D")
+        return combined.strftime("%Y-%m-%d %H:%M:%S")
+    return _generic_datetime_cell(f"{day:%Y-%m-%d} {time}")
 
 
 def _generic_datetime_cell(val: Any) -> str:
